@@ -18,6 +18,14 @@
             action: deploy
             strategy: basic
             manifests: |
-              cert-manager/cert-manager.yaml
               nginx/nginx.yaml
               example-service/echo.yaml
+        - uses: Azure/k8s-deploy@v5
+          with:
+            namespace: "cert-manager"
+            resource-group: cluster1
+            name: cluster1
+            action: deploy
+            strategy: basic
+            manifests: |
+              cert-manager/cert-manager.yaml       
