@@ -18,8 +18,16 @@
             action: deploy
             strategy: basic
             manifests: |
-              nginx/nginx.yaml
               example-service/echo.yaml
+        - uses: Azure/k8s-deploy@v5
+          with:
+            namespace: "ingress-nginx"
+            resource-group: cluster1
+            name: cluster1
+            action: deploy
+            strategy: basic
+            manifests: |
+              nginx/nginx.yaml
         - uses: Azure/k8s-deploy@v5
           with:
             namespace: "cert-manager"
