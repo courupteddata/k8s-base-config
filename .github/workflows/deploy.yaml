@@ -17,7 +17,6 @@
             name: cluster1
             action: deploy
             strategy: basic
-            private-cluster: true
             manifests: |
               cert-manager/cert-manager.yaml
               nginx/nginx.yaml
