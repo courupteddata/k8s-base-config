@@ -13,11 +13,10 @@
             kubeconfig: ${{ secrets.KUBE_CONFIG }}
         - uses: Azure/k8s-deploy@v5
           with:
-            #resource-group: yourResourceGroup
+            resource-group: cluster1
             name: cluster1
             action: deploy
             strategy: basic
-
             private-cluster: true
             manifests: |
               cert-manager/cert-manager.yaml
