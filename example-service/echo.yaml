@@ -5,7 +5,7 @@ metadata:
 spec:
   ports:
     - port: 80
-      targetPort: 3000
+      targetPort: 5678
   selector:
     app: echo1
 ---
@@ -25,6 +25,8 @@ spec:
     spec:
       containers:
         - name: echo1
-          image: courupteddata/echo-app:main
+          image: hashicorp/http-echo
+          args:
+            - "-text=echo1"
           ports:
-            - containerPort: 3000
+            - containerPort: 5678
