@@ -10,7 +10,7 @@
         - name: Find and Replace
           run: |
             sed -i 's/email_address_replace_me/${{ secrets.EMAIL }}/g' cert-manager/prod_issuer.yaml && \
-            sed -i 's/email_address_replace_me/${{ secrets.EMAIL }}/g' cert-manager/stagging_issuer.yaml
+            sed -i 's/email_address_replace_me/${{ secrets.EMAIL }}/g' cert-manager/staging_issuer.yaml
         - uses: Azure/setup-kubectl@v4
         - uses: Azure/k8s-set-context@v4
           with:
