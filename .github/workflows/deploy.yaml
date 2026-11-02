@@ -14,8 +14,7 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  HELM_VERSION: v4.0.0              # pin to the Helm 4 release you've tested
-  INGRESS_NGINX_CHART_VERSION: ""   # e.g. 4.x.y – pin it
+  INGRESS_NGINX_CHART_VERSION: ""   # e.g. 4.x.y – pin to match your running controller
   CERT_MANAGER_VERSION: v1.15.1     # must match existing static manifests for the first run
 
 jobs:
@@ -39,7 +38,7 @@ jobs:
           method: kubeconfig
           kubeconfig: ${{ secrets.KUBE_CONFIG }}
 
-      - name: Install Helm 4
+      - name: Install Helm 4 (latest)
         shell: bash
         run: |
           set -euo pipefail
@@ -47,9 +46,22 @@ jobs:
           curl -fsSL -o get-helm-4 \
             https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-4
           chmod 700 get-helm-4
-          ./get-helm-4 --version "${HELM_VERSION}"
+          ./get-helm-4
 
-          helm version
+          ver="$(helm version --template '{{.Version}}')"
+          echo "Installed Helm ${ver}"
+
+          case "$ver" in
+            v4.0.0|v4.0.0+*)
+              echo "Helm v4.0.0 has the managedFields adoption bug; need a later 4.x" >&2
+              exit 1
+              ;;
+            v4.*) ;;
+            *)
+              echo "Expected Helm 4.x, got ${ver}" >&2
+              exit 1
+              ;;
+          esac
 
       - name: Substitute cert-manager email
         env:
@@ -73,15 +85,51 @@ jobs:
                   path.read_text().replace("email_address_replace_me", email)
               )
           PY
+
+      # Removes only the stored release record (Helm's Secret) when a first
+      # install failed. It never touches the cluster resources themselves,
+      # so the LoadBalancer Service and its IP are left alone.
+      - name: Clear failed first-install release records
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          clear_failed() {
+            local release="$1" ns="$2" status
+            status="$(helm status "$release" -n "$ns" -o json 2>/dev/null \
+              | jq -r '.info.status' || true)"
+
+            case "$status" in
+              failed|pending-install)
+                if helm history "$release" -n "$ns" -o json \
+                    | jq -e 'any(.[]; .status == "deployed" or .status == "superseded")' >/dev/null; then
+                  echo "${release} has a previous good revision; leaving history alone"
+                else
+                  echo "Removing failed release record for ${release} (status: ${status})"
+                  kubectl delete secret -n "$ns" \
+                    -l "owner=helm,name=${release}" --ignore-not-found
+                fi
+                ;;
+              *)
+                echo "${release}: ${status:-not installed}"
+                ;;
+            esac
+          }
+
+          clear_failed ingress-nginx ingress-nginx
+          clear_failed cert-manager cert-manager
+
       # One-time migration: hand ownership of kubectl-applied ingress-nginx
-      # resources to Helm. No-op once the release exists.
+      # resources to Helm. No-op once the release is deployed.
       - name: Adopt existing ingress-nginx resources into Helm
         shell: bash
         run: |
           set -euo pipefail
 
-          if helm status ingress-nginx -n ingress-nginx >/dev/null 2>&1; then
-            echo "ingress-nginx release already exists; skipping adoption"
+          status="$(helm status ingress-nginx -n ingress-nginx -o json 2>/dev/null \
+            | jq -r '.info.status' || true)"
+          if [ "$status" = "deployed" ]; then
+            echo "ingress-nginx release already deployed; skipping adoption"
             exit 0
           fi
 
@@ -124,9 +172,9 @@ jobs:
             adopt "$kind" cluster
           done
 
-          # The admission Jobs are immutable and don't need to be kept.
-          # The chart recreates them as Helm hooks.
+          # The admission Jobs are immutable; the chart recreates them as hooks.
           kubectl delete job -n "$RELEASE_NS" -l "$SELECTOR" --ignore-not-found
+
       - name: Install or upgrade ingress-nginx
         shell: bash
         run: |
@@ -140,15 +188,23 @@ jobs:
             --namespace ingress-nginx \
             --create-namespace \
             --values nginx/values-lke.yaml \
+            --force-conflicts \
             --wait \
             --timeout 10m
 
       # One-time migration: hand ownership of kubectl-applied cert-manager
-      # resources to Helm. No-op once the release exists or the files are gone.
+      # resources to Helm. No-op once the release is deployed or the files are gone.
       - name: Adopt existing cert-manager resources into Helm
         shell: bash
         run: |
           set -euo pipefail
+
+          status="$(helm status cert-manager -n cert-manager -o json 2>/dev/null \
+            | jq -r '.info.status' || true)"
+          if [ "$status" = "deployed" ]; then
+            echo "cert-manager release already deployed; skipping adoption"
+            exit 0
+          fi
 
           adopt_file() {
             local release="$1" file="$2" objs count
@@ -159,9 +215,9 @@ jobs:
             objs="$(
               kubectl get -f "$file" --ignore-not-found -o json \
                 | jq '{apiVersion: "v1", kind: "List", items: [
-                    (if .kind == "List" then .items[] else . end)
-                    | select(.kind != "Namespace")
-                  ]}'
+                        (if .kind == "List" then .items[] else . end)
+                        | select(.kind != "Namespace")
+                      ]}'
             )"
 
             count="$(jq '.items | length' <<<"$objs")"
@@ -175,10 +231,8 @@ jobs:
               --overwrite <<<"$objs"
           }
 
-          if ! helm status cert-manager -n cert-manager >/dev/null 2>&1; then
-            adopt_file cert-manager cert-manager/cert-manager.yaml
-            adopt_file cert-manager cert-manager/cert-manager-kube-system.yaml
-          fi
+          adopt_file cert-manager cert-manager/cert-manager.yaml
+          adopt_file cert-manager cert-manager/cert-manager-kube-system.yaml
 
       - name: Install or upgrade cert-manager
         shell: bash
@@ -193,6 +247,7 @@ jobs:
             --namespace cert-manager \
             --create-namespace \
             --values cert-manager/values.yaml \
+            --force-conflicts \
             --wait \
             --timeout 10m
 
