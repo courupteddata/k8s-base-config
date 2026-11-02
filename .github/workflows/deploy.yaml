@@ -73,7 +73,60 @@ jobs:
                   path.read_text().replace("email_address_replace_me", email)
               )
           PY
+      # One-time migration: hand ownership of kubectl-applied ingress-nginx
+      # resources to Helm. No-op once the release exists.
+      - name: Adopt existing ingress-nginx resources into Helm
+        shell: bash
+        run: |
+          set -euo pipefail
 
+          if helm status ingress-nginx -n ingress-nginx >/dev/null 2>&1; then
+            echo "ingress-nginx release already exists; skipping adoption"
+            exit 0
+          fi
+
+          RELEASE=ingress-nginx
+          RELEASE_NS=ingress-nginx
+          SELECTOR=app.kubernetes.io/name=ingress-nginx
+
+          adopt() {
+            local kind="$1" scope="$2" names
+            if [ "$scope" = "ns" ]; then
+              names="$(kubectl get "$kind" -n "$RELEASE_NS" -l "$SELECTOR" -o name 2>/dev/null || true)"
+            else
+              names="$(kubectl get "$kind" -l "$SELECTOR" -o name 2>/dev/null || true)"
+            fi
+            [ -n "$names" ] || return 0
+
+            for obj in $names; do
+              echo "Adopting ${obj}"
+              if [ "$scope" = "ns" ]; then
+                kubectl label "$obj" -n "$RELEASE_NS" app.kubernetes.io/managed-by=Helm --overwrite
+                kubectl annotate "$obj" -n "$RELEASE_NS" \
+                  meta.helm.sh/release-name="$RELEASE" \
+                  meta.helm.sh/release-namespace="$RELEASE_NS" --overwrite
+              else
+                kubectl label "$obj" app.kubernetes.io/managed-by=Helm --overwrite
+                kubectl annotate "$obj" \
+                  meta.helm.sh/release-name="$RELEASE" \
+                  meta.helm.sh/release-namespace="$RELEASE_NS" --overwrite
+              fi
+            done
+          }
+
+          # Namespaced resources
+          for kind in serviceaccount configmap role rolebinding service deployment; do
+            adopt "$kind" ns
+          done
+
+          # Cluster-scoped resources
+          for kind in clusterrole clusterrolebinding ingressclass validatingwebhookconfiguration; do
+            adopt "$kind" cluster
+          done
+
+          # The admission Jobs are immutable and don't need to be kept.
+          # The chart recreates them as Helm hooks.
+          kubectl delete job -n "$RELEASE_NS" -l "$SELECTOR" --ignore-not-found
       - name: Install or upgrade ingress-nginx
         shell: bash
         run: |
