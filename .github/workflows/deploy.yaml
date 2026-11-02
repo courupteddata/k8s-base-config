@@ -86,6 +86,7 @@ jobs:
             --namespace ingress-nginx \
             --create-namespace \
             --values nginx/values-lke.yaml \
+            --force-conflicts \
             --wait \
             --timeout 10m
 
@@ -101,6 +102,7 @@ jobs:
             --namespace cert-manager \
             --create-namespace \
             --values cert-manager/values.yaml \
+            --force-conflicts \
             --wait \
             --timeout 10m
 
