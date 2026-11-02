@@ -1,0 +1,4 @@
+crds:
+  enabled: true
+  # Keep CRDs (and therefore all Certificates) if the release is ever uninstalled
+  keep: true

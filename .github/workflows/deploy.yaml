@@ -1,56 +1,162 @@
-  on:
-    workflow_dispatch:
-    push:
-      branches:
-        - main
-  jobs:
-    deploy:
-      runs-on: ubuntu-latest
-      steps:
-        - uses: actions/checkout@master
-        - name: Find and Replace
-          run: |
-            sed -i 's/email_address_replace_me/${{ secrets.EMAIL }}/g' cert-manager/prod_issuer.yaml && \
-            sed -i 's/email_address_replace_me/${{ secrets.EMAIL }}/g' cert-manager/staging_issuer.yaml
-        - uses: Azure/setup-kubectl@v4
-        - uses: Azure/k8s-set-context@v4
-          with:
-            kubeconfig: ${{ secrets.KUBE_CONFIG }}
-        - uses: Azure/k8s-deploy@v5
-          with:
-            resource-group: cluster1
-            name: cluster1
-            action: deploy
-            strategy: basic
-            manifests: |
-              example-service/echo.yaml
-              example-service/ingress.yaml
-        - uses: Azure/k8s-deploy@v5
-          with:
-            namespace: "ingress-nginx"
-            resource-group: cluster1
-            name: cluster1
-            action: deploy
-            strategy: basic
-            manifests: |
-              nginx/nginx.yaml
-        - uses: Azure/k8s-deploy@v5
-          with:
-            namespace: "cert-manager"
-            resource-group: cluster1
-            name: cluster1
-            action: deploy
-            strategy: basic
-            manifests: |
-              cert-manager/cert-manager.yaml
-              cert-manager/prod_issuer.yaml
-              cert-manager/staging_issuer.yaml
-        - uses: Azure/k8s-deploy@v5
-          with:
-            namespace: "kube-system"
-            resource-group: cluster1
-            name: cluster1
-            action: deploy
-            strategy: basic
-            manifests: |
-              cert-manager/cert-manager-kube-system.yaml 
+name: Deploy to LKE
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-lke
+  cancel-in-progress: false
+
+env:
+  HELM_VERSION: v4.0.0              # pin to the Helm 4 release you've tested
+  INGRESS_NGINX_CHART_VERSION: ""   # e.g. 4.x.y – pin it
+  CERT_MANAGER_VERSION: v1.15.1     # must match existing static manifests for the first run
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Install kubectl
+        uses: Azure/setup-kubectl@v5
+        with:
+          version: latest
+          # For a production workflow, pin this to your LKE cluster's
+          # Kubernetes version, for example: v1.xx.x
+
+      - name: Set LKE context
+        uses: Azure/k8s-set-context@v5
+        with:
+          method: kubeconfig
+          kubeconfig: ${{ secrets.KUBE_CONFIG }}
+
+      - name: Install Helm 4
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          curl -fsSL -o get-helm-4 \
+            https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-4
+          chmod 700 get-helm-4
+          ./get-helm-4 --version "${HELM_VERSION}"
+
+          helm version
+
+      - name: Substitute cert-manager email
+        env:
+          CERT_EMAIL: ${{ secrets.EMAIL }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+
+          email = os.environ["CERT_EMAIL"]
+
+          for filename in (
+              "cert-manager/prod_issuer.yaml",
+              "cert-manager/staging_issuer.yaml",
+          ):
+              path = Path(filename)
+              path.write_text(
+                  path.read_text().replace("email_address_replace_me", email)
+              )
+          PY
+
+      - name: Install or upgrade ingress-nginx
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          helm repo add ingress-nginx https://kubernetes.github.io/ingress-nginx
+          helm repo update ingress-nginx
+
+          helm upgrade --install ingress-nginx ingress-nginx/ingress-nginx \
+            ${INGRESS_NGINX_CHART_VERSION:+--version "$INGRESS_NGINX_CHART_VERSION"} \
+            --namespace ingress-nginx \
+            --create-namespace \
+            --values nginx/values-lke.yaml \
+            --wait \
+            --timeout 10m
+
+      # One-time migration: hand ownership of kubectl-applied cert-manager
+      # resources to Helm. No-op once the release exists or the files are gone.
+      - name: Adopt existing cert-manager resources into Helm
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          adopt_file() {
+            local release="$1" file="$2" objs count
+            [ -f "$file" ] || return 0
+
+            # Only objects that exist in the cluster; skip the Namespace
+            # (it isn't part of the chart).
+            objs="$(
+              kubectl get -f "$file" --ignore-not-found -o json \
+                | jq '{apiVersion: "v1", kind: "List", items: [
+                    (if .kind == "List" then .items[] else . end)
+                    | select(.kind != "Namespace")
+                  ]}'
+            )"
+
+            count="$(jq '.items | length' <<<"$objs")"
+            [ "$count" -gt 0 ] || return 0
+
+            echo "Adopting ${count} objects from ${file} into release ${release}"
+            kubectl label -f - app.kubernetes.io/managed-by=Helm --overwrite <<<"$objs"
+            kubectl annotate -f - \
+              meta.helm.sh/release-name="$release" \
+              meta.helm.sh/release-namespace=cert-manager \
+              --overwrite <<<"$objs"
+          }
+
+          if ! helm status cert-manager -n cert-manager >/dev/null 2>&1; then
+            adopt_file cert-manager cert-manager/cert-manager.yaml
+            adopt_file cert-manager cert-manager/cert-manager-kube-system.yaml
+          fi
+
+      - name: Install or upgrade cert-manager
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          helm repo add jetstack https://charts.jetstack.io
+          helm repo update jetstack
+
+          helm upgrade --install cert-manager jetstack/cert-manager \
+            --version "${CERT_MANAGER_VERSION}" \
+            --namespace cert-manager \
+            --create-namespace \
+            --values cert-manager/values.yaml \
+            --wait \
+            --timeout 10m
+
+      - name: Apply cert-manager issuers
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          kubectl apply \
+            -f cert-manager/prod_issuer.yaml \
+            -f cert-manager/staging_issuer.yaml
+
+      - name: Deploy example service and Ingress
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          kubectl apply \
+            -f example-service/echo.yaml \
+            -f example-service/ingress.yaml
