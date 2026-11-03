@@ -74,18 +74,24 @@ jobs:
               )
           PY
 
-      - name: Install or upgrade ingress-nginx
+      - name: Ensure nginx IngressClass exists
+        shell: bash
+        run: |
+          set -euo pipefail
+          kubectl apply -f traefik/ingressclass-nginx.yaml
+
+      - name: Install or upgrade Traefik
         shell: bash
         run: |
           set -euo pipefail
 
-          helm repo add ingress-nginx https://kubernetes.github.io/ingress-nginx
-          helm repo update ingress-nginx
+          helm repo add traefik https://traefik.github.io/charts
+          helm repo update traefik
 
-          helm upgrade --install ingress-nginx ingress-nginx/ingress-nginx \
-            --namespace ingress-nginx \
+          helm upgrade --install traefik traefik/traefik \
+            --namespace traefik \
             --create-namespace \
-            --values nginx/values-lke.yaml \
+            --values traefik/values-lke.yaml \
             --force-conflicts \
             --wait \
             --timeout 10m
