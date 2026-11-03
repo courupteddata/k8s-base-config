@@ -1,6 +1,6 @@
 providers:
   # Serve ingress-nginx-style Ingresses (class "nginx", nginx.ingress.kubernetes.io/* annotations)
-  kubernetesIngressNginx:
+  kubernetesIngressNGINX:
     enabled: true
     ingressClass: nginx
     controllerClass: k8s.io/ingress-nginx
